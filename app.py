@@ -41,7 +41,38 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---------------- GOOGLE SHEETS ----------------
+# ======================================================
+# 🔐 AUTHENTICATION
+# ======================================================
+def login():
+    st.title("🔐 Login")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        users = st.secrets["auth_users"]
+
+        if username in users and password == users[username]:
+            st.session_state["authenticated"] = True
+            st.session_state["username"] = username
+            st.rerun()
+        else:
+            st.error("❌ Invalid username or password")
+
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    login()
+    st.stop()
+
+annotator = st.session_state["username"]
+
+# ======================================================
+# GOOGLE SHEETS
+# ======================================================
 @st.cache_resource
 def get_sheet():
     scopes = [
@@ -58,46 +89,40 @@ def get_sheet():
 
 sheet = get_sheet()
 
-# ---------------- GITHUB HELPERS ----------------
+# ======================================================
+# GITHUB HELPERS
+# ======================================================
 @st.cache_data(show_spinner=False)
 def github_list_folders(owner, repo, path=""):
-    """List top-level folders in a GitHub repo"""
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={GITHUB_BRANCH}"
     headers = {
         "Authorization": f"Bearer {st.secrets['GITHUB_TOKEN']}",
         "Accept": "application/vnd.github+json"
     }
-
     r = requests.get(url, headers=headers)
     r.raise_for_status()
-
-    items = r.json()
-    return [i["name"] for i in items if i["type"] == "dir"]
+    return [i["name"] for i in r.json() if i["type"] == "dir"]
 
 
 @st.cache_data(show_spinner=False)
 def load_page_jsonl(owner, repo, page_name):
     path = f"{page_name}/facebook_posts.jsonl"
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={GITHUB_BRANCH}"
-
     headers = {
         "Authorization": f"Bearer {st.secrets['GITHUB_TOKEN']}",
         "Accept": "application/vnd.github.raw"
     }
-
     r = requests.get(url, headers=headers)
     r.raise_for_status()
 
     df = pd.read_json(io.BytesIO(r.content), lines=True)
 
-    # Ensure post_id exists and is string
     if "post_id" not in df.columns:
-        st.error(" post_id column missing in dataset")
+        st.error("❌ post_id column missing in dataset")
         st.stop()
 
     df["post_id"] = df["post_id"].astype(str)
     return df
-
 
 
 @st.cache_data(show_spinner=False)
@@ -111,21 +136,24 @@ def load_private_github_image(owner, repo, path):
     r.raise_for_status()
     return Image.open(io.BytesIO(r.content))
 
-
-# ===================== LAYOUT =====================
+# ======================================================
+# LAYOUT
+# ======================================================
 col_meme, col_ui = st.columns([4, 6])
 
 # ---------------- RIGHT UI ----------------
 with col_ui:
     st.title("📝 Meme Annotation Tool")
+    st.markdown(f"👤 Logged in as **{annotator}**")
 
-    annotator = st.text_input("Annotator ID")
-    if not annotator:
-        st.stop()
+    if st.button("🚪 Logout"):
+        st.session_state.clear()
+        st.rerun()
+
+    st.markdown("---")
 
     # -------- PAGE SELECTION --------
     pages = github_list_folders(GITHUB_OWNER, GITHUB_REPO)
-
     page_name = st.selectbox("Select Page / Dataset", pages)
 
     # -------- LOAD PAGE DATA --------
@@ -185,8 +213,6 @@ with col_ui:
 
 # ---------------- LEFT MEME ----------------
 with col_meme:
-    # st.markdown('<div class="meme-container">', unsafe_allow_html=True)
-
     if row.get("post_text"):
         st.markdown(row["post_text"])
 
@@ -197,5 +223,3 @@ with col_meme:
     )
 
     st.image(img, use_column_width=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
