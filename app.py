@@ -222,4 +222,7 @@ with col_meme:
         f"{page_name}/{row['image_file']}"
     )
 
-    st.image(img, use_column_width=True)
+    try:
+        st.image(img, use_column_width=True)
+    except Exception as e:
+        st.error(f"No image available for this post{e}")
