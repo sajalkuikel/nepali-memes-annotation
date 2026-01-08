@@ -186,7 +186,7 @@ with col_ui:
 
         if meme_label == "Yes":  
             st.markdown("### 📌 Meme Attributes")
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
 
             with col1:
                 sentiment = st.radio(
@@ -203,14 +203,44 @@ with col_ui:
                     index=None,
                     key=f"sarcasm_{row['post_id']}"
                 )
-
             with col3:
+                cyberbullying = st.radio(
+                    "Cyber Bullying",
+                    ["Yes", "No"],
+                    index=None,
+                    key=f"cyberbullying_{row['post_id']}"
+                )
+                harmfulness = ""
+
+                st.write('')
+                harmfulness = st.radio(
+                    "If 'Yes', please label Harmfulness Score",
+                    ["Harmless", "Partially harmful", "Very harmful"],
+                    index=None,
+                    key=f"harmfulness_{row['post_id']}",
+                    horizontal=True
+                )
+
+            with col4:
                 emotion = st.radio(
                     "Emotion",
-                    ["Anger", "Frustration", "Sad", "Happiness", "None"],
+                    [
+                        "Joy",
+                        "Sadness",
+                        "Fear",
+                        "Anger",
+                        "Disgust",
+                        "Surprise",
+                        "Trust",
+                        "Anticipation",
+                        "Ridicule",
+                        "Other"
+                    ],
                     index=None,
-                    key=f"emotion_{row['post_id']}"
+                    key=f"emotion_{row['post_id']}",
+                    horizontal=True
                 )
+
 
         submitted = st.form_submit_button("➡️ Submit & Next")
 
