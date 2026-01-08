@@ -14,13 +14,6 @@ GITHUB_OWNER = "sajalkuikel"
 GITHUB_REPO = "nepali_memes"
 GITHUB_BRANCH = "main"
 
-LABEL_MAP = {
-    "1️⃣ Positive": "Positive",
-    "2️⃣ Negative": "Negative",
-    "3️⃣ Neutral": "Neutral",
-    "4️⃣ Not a meme": "Not a meme"
-}
-
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Nepali Meme Annotation", layout="wide")
 
@@ -116,11 +109,6 @@ def load_page_jsonl(owner, repo, page_name):
     r.raise_for_status()
 
     df = pd.read_json(io.BytesIO(r.content), lines=True)
-
-    if "post_id" not in df.columns:
-        st.error("❌ post_id column missing in dataset")
-        st.stop()
-
     df["post_id"] = df["post_id"].astype(str)
     return df
 
@@ -141,28 +129,26 @@ def load_private_github_image(owner, repo, path):
 # ======================================================
 col_meme, col_ui = st.columns([4, 6])
 
-# ---------------- RIGHT UI ----------------
+# ======================================================
+# RIGHT UI
+# ======================================================
 with col_ui:
-    st.title("📝 Meme Annotation Tool")
-    st.markdown(f"👤 Logged in as **{annotator}**")
+
+    st.title("Meme Annotation Tool")
+    st.markdown("👤 Logged in as: **" + annotator + "**")
 
     if st.button("🚪 Logout"):
         st.session_state.clear()
         st.rerun()
 
-    st.markdown("---")
-
-    # -------- PAGE SELECTION --------
     pages = github_list_folders(GITHUB_OWNER, GITHUB_REPO)
     page_name = st.selectbox("Select Page / Dataset", pages)
 
-    # -------- LOAD PAGE DATA --------
     data = load_page_jsonl(GITHUB_OWNER, GITHUB_REPO, page_name)
 
-    # -------- LOAD ANNOTATIONS --------
     records = sheet.get_all_records()
     ann_df = pd.DataFrame(records) if records else pd.DataFrame(
-        columns=["page_name", "post_id", "annotator", "label", "timestamp"]
+        columns=["page_name", "post_id", "annotator", "meme", "sentiment", "sarcasm", "emotion", "timestamp"]
     )
 
     ann_df["post_id"] = ann_df["post_id"].astype(str)
@@ -180,49 +166,92 @@ with col_ui:
 
     row = remaining.iloc[0]
 
-    st.markdown(f"🔗 **[View original Facebook post]({row['post_url']})**")
     st.markdown("---")
 
-    # -------- LABEL FORM --------
+    # ======================================================
+    # LABEL FORM — fully inside col_ui (RIGHT SIDE)
+    # ======================================================
     with st.form("annotation_form"):
-        choice = st.radio(
-            "Label (1–4)",
-            list(LABEL_MAP.keys()),
-            index=None
+
+        meme_label = st.radio(
+            "Is this a meme?",
+            ["Yes", "No"],
+            horizontal=True,
+            key=f"meme_label_{row['post_id']}"
         )
+
+        sentiment = ""
+        sarcasm = ""
+        emotion = ""
+
+        if meme_label == "Yes":  
+            st.markdown("### 📌 Meme Attributes")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                sentiment = st.radio(
+                    "Sentiment",
+                    ["Positive", "Negative", "Neutral"],
+                    index=None,
+                    key=f"sentiment_{row['post_id']}"
+                )
+
+            with col2:
+                sarcasm = st.radio(
+                    "Sarcasm",
+                    ["Yes", "No"],
+                    index=None,
+                    key=f"sarcasm_{row['post_id']}"
+                )
+
+            with col3:
+                emotion = st.radio(
+                    "Emotion",
+                    ["Anger", "Frustration", "Sad", "Happiness", "None"],
+                    index=None,
+                    key=f"emotion_{row['post_id']}"
+                )
 
         submitted = st.form_submit_button("➡️ Submit & Next")
 
         if submitted:
-            if choice is None:
-                st.warning("Select a label first.")
-            else:
-                sheet.append_row([
-                    page_name,
-                    row["post_id"],
-                    annotator,
-                    LABEL_MAP[choice],
-                    datetime.now().isoformat()
-                ])
-                st.rerun()
 
-    # -------- PROGRESS --------
+            # VALIDATION ONLY IF MEME = YES
+            if meme_label == "Yes":
+                if (sentiment is None) or (sarcasm is None) or (emotion is None):
+                    st.error("⚠️ Please label sentiment, sarcasm, and emotion before submitting.")
+                    st.stop()
+
+            # SAVE THE DATA
+            sheet.append_row([
+                page_name,
+                row["post_id"],
+                annotator,
+                meme_label,
+                sentiment if sentiment else "",
+                sarcasm if sarcasm else "",
+                emotion if emotion else "",
+                datetime.now().isoformat()
+            ])
+
+            st.rerun()
+
     progress = len(done_ids) / len(data)
     st.progress(progress)
     st.caption(f"{len(done_ids)} / {len(data)} annotated for {page_name}")
 
-# ---------------- LEFT MEME ----------------
+# ======================================================
+# LEFT MEME DISPLAY
+# ======================================================
 with col_meme:
+
     if row.get("post_text"):
+        st.markdown(f"🔗 **[View Original Post]({row['post_url']})**")
+        st.markdown("---")
         st.markdown(row["post_text"])
 
-    img = load_private_github_image(
-        GITHUB_OWNER,
-        GITHUB_REPO,
-        f"{page_name}/{row['image_file']}"
-    )
-
     try:
+        img = load_private_github_image(GITHUB_OWNER, GITHUB_REPO, f"{page_name}/{row['image_file']}")
         st.image(img, use_column_width=True)
-    except Exception as e:
-        st.error(f"No image available for this post{e}")
+    except:
+        st.error("No image available for this post.")
