@@ -195,27 +195,48 @@ with col_ui:
                     index=None,
                     key=f"sentiment_{row['post_id']}"
                 )
-
-            with col2:
                 sarcasm = st.radio(
-                    "Sarcasm",
-                    ["Yes", "No"],
+                    "Type of Sarcasm",
+                    ["Benign / Playful", "Mocking/Sarcasm", "Critical / Satirical", "Malicious", "Deceptive"],
                     index=None,
                     key=f"sarcasm_{row['post_id']}"
                 )
-            with col3:
-                cyberbullying = st.radio(
-                    "Cyber Bullying",
+
+            with col2:
+                 cyberbullying = st.radio(
+                    "Presence of Hate / Cyber Bullying",
                     ["Yes", "No"],
                     index=None,
                     key=f"cyberbullying_{row['post_id']}"
                 )
+                 
+                 target = st.radio(
+                    "Target of the meme",
+                    ["Individual", "Organizatrion", 'Community', "None"],
+                    index=None,
+                    key=f"target{row['post_id']}"
+                )
+                 
+                 protected_group = st.radio(
+                    "Is target a protected group?",
+                    ["Yes", "No"],
+                    index=None,
+                    key=f"protected_group{row['post_id']}"
+                )
+                 
+            with col3:
+                harm = st.radio(
+                    "How does this meme harm the target?",
+                    ["Psychological/Emotional", "Social/Reputational", "Financial or Material",  "No Harm"],
+                    index=None,
+                    key=f"harm{row['post_id']}"
+                )
+                
                 harmfulness = ""
-
                 st.write('')
                 harmfulness = st.radio(
-                    "If 'Yes', please label Harmfulness Score",
-                    ["Harmless", "Partially harmful", "Very harmful"],
+                    "If 'Harmfull,', please label Harmfulness Score",
+                    ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful" ],
                     index=None,
                     key=f"harmfulness_{row['post_id']}",
                     horizontal=True
@@ -240,6 +261,21 @@ with col_ui:
                     key=f"emotion_{row['post_id']}",
                     horizontal=True
                 )
+                
+                # age = st.slider('How old are you?', 0, 130, 25)
+                contribution = st.radio(
+                    "Modality Contributing to Harm",
+                    [
+                        "Image",
+                        "Text",
+                        "Image + text combined",
+                        "None",
+                    ],
+                    index=None,
+                    key=f"contribution_{row['post_id']}",
+                    horizontal=True
+                )
+
 
 
         submitted = st.form_submit_button("➡️ Submit & Next")
