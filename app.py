@@ -148,7 +148,7 @@ with col_ui:
 
     records = sheet.get_all_records()
     ann_df = pd.DataFrame(records) if records else pd.DataFrame(
-        columns=["page_name", "post_id", "annotator", "meme", "sentiment", "sarcasm", "emotion", "timestamp"]
+        columns=["page_name", "post_id", "annotator", "meme", "sentiment", "intent", "cyberbullying", "target", "protected_group", "harm", "harmfulness", "emotion", "modality", "timestamp"]
     )
 
     ann_df["post_id"] = ann_df["post_id"].astype(str)
@@ -195,11 +195,11 @@ with col_ui:
                     index=None,
                     key=f"sentiment_{row['post_id']}"
                 )
-                sarcasm = st.radio(
-                    "Type of Sarcasm",
+                intent = st.radio(
+                    "Intent of Meme",
                     ["Benign / Playful", "Mocking/Sarcasm", "Critical / Satirical", "Malicious", "Deceptive"],
                     index=None,
-                    key=f"sarcasm_{row['post_id']}"
+                    key=f"intent_{row['post_id']}"
                 )
 
             with col2:
@@ -214,14 +214,14 @@ with col_ui:
                     "Target of the meme",
                     ["Individual", "Organizatrion", 'Community', "None"],
                     index=None,
-                    key=f"target{row['post_id']}"
+                    key=f"target_{row['post_id']}"
                 )
                  
                  protected_group = st.radio(
                     "Is target a protected group?",
                     ["Yes", "No"],
                     index=None,
-                    key=f"protected_group{row['post_id']}"
+                    key=f"protected_group_{row['post_id']}"
                 )
                  
             with col3:
@@ -229,13 +229,13 @@ with col_ui:
                     "How does this meme harm the target?",
                     ["Psychological/Emotional", "Social/Reputational", "Financial or Material",  "No Harm"],
                     index=None,
-                    key=f"harm{row['post_id']}"
+                    key=f"harm_{row['post_id']}"
                 )
                 
                 harmfulness = ""
                 st.write('')
                 harmfulness = st.radio(
-                    "If 'Harmfull,', please label Harmfulness Score",
+                    "If 'Harmful' , please label Harmfulness Score",
                     ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful" ],
                     index=None,
                     key=f"harmfulness_{row['post_id']}",
@@ -263,7 +263,7 @@ with col_ui:
                 )
                 
                 # age = st.slider('How old are you?', 0, 130, 25)
-                contribution = st.radio(
+                modality = st.radio(
                     "Modality Contributing to Harm",
                     [
                         "Image",
@@ -272,7 +272,7 @@ with col_ui:
                         "None",
                     ],
                     index=None,
-                    key=f"contribution_{row['post_id']}",
+                    key=f"modality_{row['post_id']}",
                     horizontal=True
                 )
 
@@ -283,10 +283,36 @@ with col_ui:
         if submitted:
 
             # VALIDATION ONLY IF MEME = YES
+            # if meme_label == "Yes":
+            #     if (sentiment is None) or (sarcasm is None) or (emotion is None):
+            #         st.error("⚠️ Please label sentiment, sarcasm, and emotion before submitting.")
+            #         st.stop()
             if meme_label == "Yes":
-                if (sentiment is None) or (sarcasm is None) or (emotion is None):
-                    st.error("⚠️ Please label sentiment, sarcasm, and emotion before submitting.")
+
+                # Core required fields for a valid meme annotation
+                required_fields = {
+                    "Sentiment": sentiment,
+                    "Intent": intent,
+                    "Cyberbullying": cyberbullying,
+                    "Target": target,
+                    "Harm Type": harm,
+                    "Emotion": emotion,
+                    "Modality": modality
+                }
+
+                # Find missing fields
+                missing = [name for name, value in required_fields.items() if value is None]
+
+                if missing:
+                    st.error(f"⚠️ Please label: {', '.join(missing)}")
                     st.stop()
+
+                # Conditional validation:
+                # Harmfulness score required ONLY if harm is present
+                if harm != "No Harm" and harmfulness is None:
+                    st.error("⚠️ Please provide a Harmfulness score for harmful content.")
+                    st.stop()
+
 
             # SAVE THE DATA
             sheet.append_row([
@@ -295,8 +321,15 @@ with col_ui:
                 annotator,
                 meme_label,
                 sentiment if sentiment else "",
-                sarcasm if sarcasm else "",
+                intent if intent else "",
+                cyberbullying if cyberbullying else "",
+                target if target else "",
+                protected_group if protected_group else "",
+                harm if harm else "",
+                harmfulness if harmfulness else "",
                 emotion if emotion else "",
+                modality if modality else "",
+
                 datetime.now().isoformat()
             ])
 
