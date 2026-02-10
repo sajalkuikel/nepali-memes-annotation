@@ -203,7 +203,7 @@ with col_ui:
                 )
                 intent = st.radio(
                     "Intent of Meme",
-                    ["Benign / Playful", "Mocking/Sarcasm", "Critical / Satirical", "Malicious", "Deceptive"],
+                    ["Benign / Playful - (हानिरहित / रमाइलो उद्देश्य)", "Mocking/Sarcasm (उडाउने / व्यंग्यात्मक)", "Critical / Satirical (आलोचनात्मक/ व्यंग्यसहितको)", "Malicious (हानि पुर्‍याउने नियत)", "Deceptive (भ्रामक / गलत धारणा फैलाउने)"],
                     index=None,
                     key=f"intent_{row['post_id']}"
                 )
@@ -233,7 +233,7 @@ with col_ui:
             with col3:
                 harm = st.radio(
                     "How does this meme harm the target?",
-                    ["Psychological/Emotional", "Social/Reputational", "Financial or Material",  "No Harm"],
+                    ["Psychological/Emotional (मानसिक / भावनात्मक)", "Social/Reputational (सामाजिक / प्रतिष्ठासम्बन्धी)", "Financial or Material (आर्थिक वा भौतिक हानि)",  "No Harm"],
                     index=None,
                     key=f"harm_{row['post_id']}"
                 )
@@ -252,15 +252,15 @@ with col_ui:
                 emotion = st.radio(
                     "Emotion",
                     [
-                        "Joy",
-                        "Sadness",
-                        "Fear",
-                        "Anger",
-                        "Disgust",
-                        "Surprise",
-                        "Trust",
-                        "Anticipation",
-                        "Ridicule",
+                        "Joy (खुशी)",
+                        "Sadness (दुःख)",
+                        "Fear (डर)",
+                        "Anger (रिस)",
+                        "Disgust (घृणा)",
+                        "Surprise (आश्चर्य)",
+                        "Trust (विश्वास)",
+                        "Anticipation (अपेक्षा)",
+                        "Ridicule (उपहास / खिल्ली उडाउने)",
                         "Other"
                     ],
                     index=None,
