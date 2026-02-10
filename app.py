@@ -154,8 +154,7 @@ with col_ui:
     ann_df["post_id"] = ann_df["post_id"].astype(str)
 
     done_ids = ann_df[
-        (ann_df["annotator"] == annotator) &
-        (ann_df["page_name"] == page_name)
+        ann_df["page_name"] == page_name
     ]["post_id"].tolist()
 
     remaining = data[~data["post_id"].isin(done_ids)]
@@ -180,9 +179,16 @@ with col_ui:
             key=f"meme_label_{row['post_id']}"
         )
 
-        sentiment = ""
-        sarcasm = ""
-        emotion = ""
+        sentiment = None
+        intent = None
+        cyberbullying = None
+        target = None
+        protected_group = None
+        harm = None
+        harmfulness = None
+        emotion = None
+        modality = None
+
 
         if meme_label == "Yes":  
             st.markdown("### 📌 Meme Attributes")
@@ -276,20 +282,14 @@ with col_ui:
                     horizontal=True
                 )
 
-
-
         submitted = st.form_submit_button("➡️ Submit & Next")
 
         if submitted:
-
+            # ==============================
             # VALIDATION ONLY IF MEME = YES
-            # if meme_label == "Yes":
-            #     if (sentiment is None) or (sarcasm is None) or (emotion is None):
-            #         st.error("⚠️ Please label sentiment, sarcasm, and emotion before submitting.")
-            #         st.stop()
+            # ==============================
             if meme_label == "Yes":
 
-                # Core required fields for a valid meme annotation
                 required_fields = {
                     "Sentiment": sentiment,
                     "Intent": intent,
@@ -300,40 +300,41 @@ with col_ui:
                     "Modality": modality
                 }
 
-                # Find missing fields
-                missing = [name for name, value in required_fields.items() if value is None]
+                missing = [k for k, v in required_fields.items() if v is None]
 
                 if missing:
                     st.error(f"⚠️ Please label: {', '.join(missing)}")
-                    st.stop()
-
-                # Conditional validation:
-                # Harmfulness score required ONLY if harm is present
-                if harm != "No Harm" and harmfulness is None:
+                elif harm != "No Harm" and harmfulness is None:
                     st.error("⚠️ Please provide a Harmfulness score for harmful content.")
-                    st.stop()
+                else:
+                    save_and_next = True
+            else:
+                # Meme = No → always valid
+                save_and_next = True
 
 
-            # SAVE THE DATA
-            sheet.append_row([
-                page_name,
-                row["post_id"],
-                annotator,
-                meme_label,
-                sentiment if sentiment else "",
-                intent if intent else "",
-                cyberbullying if cyberbullying else "",
-                target if target else "",
-                protected_group if protected_group else "",
-                harm if harm else "",
-                harmfulness if harmfulness else "",
-                emotion if emotion else "",
-                modality if modality else "",
+            if submitted and 'save_and_next' in locals() and save_and_next:
 
-                datetime.now().isoformat()
-            ])
+                # SAVE THE DATA
+                sheet.append_row([
+                    page_name,
+                    row["post_id"],
+                    annotator,
+                    meme_label,
+                    sentiment if sentiment else "",
+                    intent if intent else "",
+                    cyberbullying if cyberbullying else "",
+                    target if target else "",
+                    protected_group if protected_group else "",
+                    harm if harm else "",
+                    harmfulness if harmfulness else "",
+                    emotion if emotion else "",
+                    modality if modality else "",
 
-            st.rerun()
+                    datetime.now().isoformat()
+                ])
+
+                st.rerun()
 
     progress = len(done_ids) / len(data)
     st.progress(progress)
