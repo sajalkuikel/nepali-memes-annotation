@@ -218,7 +218,7 @@ with col_ui:
                  
                  target = st.radio(
                     "Target of the meme",
-                    ["Individual", "Organizatrion", 'Community', "None"],
+                    ["Individual", "Organization", 'Community', "None"],
                     index=None,
                     key=f"target_{row['post_id']}"
                 )
@@ -227,9 +227,24 @@ with col_ui:
                     "Is target a protected group?",
                     ["Yes", "No"],
                     index=None,
-                    key=f"protected_group_{row['post_id']}"
+                    key=f"protected_group_{row['post_id']}",
+                    help=(
+                        "**Nepal Context:** Select 'Yes' if the target belongs to a group eligible for "
+                        "reservation/protection under Nepal's Civil Service Act or Constitution.\n\n"
+                        "**Includes:**\n"
+                        "- **Women**\n"
+                        "- **Adibasi / Janajati** (Indigenous Nationalities)\n"
+                        "- **Madhesi / Tharu / Muslim** \n"
+                        "- **Dalit**\n"
+                        "- **Persons with Disabilities**\n"
+                        "- **Residents of Backward Areas** (Karnali zone/remote districts)\n"
+                        "- **Gender & Sexual Minorities** (LGBTQ+)"
+                    )
                 )
-                 
+                 st.caption("""
+                    Includes: Caste/ Religion/ Gender & Sexual Minorities/ Disability/ Region/ Language/ Economic Class/ Ideology  
+                    *Eg. Dalits, Madhesis, Muslims, LGBTQ+, disabled, etc.*
+                    """)
             with col3:
                 harm = st.radio(
                     "How does this meme harm the target?",
@@ -270,7 +285,7 @@ with col_ui:
                 
                 # age = st.slider('How old are you?', 0, 130, 25)
                 modality = st.radio(
-                    "Modality Contributing to Harm",
+                    "Modality.\n (Select how the meme conveys meaning) ",
                     [
                         "Image",
                         "Text",
