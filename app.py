@@ -6,6 +6,11 @@ from google.oauth2.service_account import Credentials
 import requests
 from PIL import Image
 import io
+import json
+import threading
+import time
+from google import genai
+from google.genai import types
 
 # ---------------- CONFIG ----------------
 SHEET_NAME = "annotation_db"
@@ -20,8 +25,24 @@ ANN_COLUMNS = [
     "emotion", "modality", "timestamp"
 ]
 
-
+# Once a meme has received this many HUMAN annotations (across all
+# annotators), it's considered "done" and drops out of re-annotation.
+# Change this single number to raise/lower the cap (e.g. 3 or 5).
 MAX_ANNOTATIONS_PER_MEME = 3
+
+# ---- AI pre-annotation config ----
+AI_WORKSHEET_NAME = "ai_suggestions"
+# Verify this is still a valid free-tier model at https://ai.google.dev/gemini-api/docs/models
+# and swap it here if Google renames/retires it.
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+# How many upcoming memes to keep pre-annotated ahead of the current one.
+BUFFER_SIZE = 1
+
+AI_COLUMNS = [
+    "page_name", "post_id", "meme", "sentiment", "intent", "cyberbullying",
+    "target", "protected_group", "harm", "harmfulness", "emotion", "modality",
+    "reasoning", "model", "generated_at"
+]
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Nepali Meme Annotation", layout="wide")
@@ -44,7 +65,7 @@ st.markdown(
 )
 
 # ======================================================
-#  AUTHENTICATION
+# 🔐 AUTHENTICATION
 # ======================================================
 def login():
     st.title("🔐 Login")
@@ -76,7 +97,7 @@ annotator = st.session_state["username"]
 # GOOGLE SHEETS
 # ======================================================
 @st.cache_resource
-def get_sheet():
+def get_spreadsheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -86,10 +107,148 @@ def get_sheet():
         scopes=scopes
     )
     gc = gspread.authorize(creds)
-    return gc.open(SHEET_NAME).sheet1
+    return gc.open(SHEET_NAME)
+
+
+@st.cache_resource
+def get_sheet():
+    # The human annotation worksheet — untouched, exactly as before.
+    return get_spreadsheet().sheet1
+
+
+@st.cache_resource
+def get_ai_sheet():
+    # A separate worksheet tab for AI suggestions, created on first use.
+    ss = get_spreadsheet()
+    try:
+        ws = ss.worksheet(AI_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = ss.add_worksheet(title=AI_WORKSHEET_NAME, rows=2000, cols=len(AI_COLUMNS) + 2)
+        ws.append_row(AI_COLUMNS)
+    return ws
 
 
 sheet = get_sheet()
+
+# ======================================================
+# GEMINI SETUP
+# ======================================================
+@st.cache_resource
+def get_genai_client():
+    return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+LABEL_PROMPT_INSTRUCTIONS = """
+You are assisting with annotating Nepali-language memes for a cyberbullying-detection
+research project. Look at the attached image and the post caption (if given) together,
+then decide the following labels. Copy option strings EXACTLY as listed (including any
+Nepali text) — do not invent new wording.
+
+meme: ["Yes", "No"]
+  Yes = this is a meme (uses image/text together to make a joke, satire, or commentary).
+  No = not a meme (plain photo, announcement, ad, etc.). If "No", set every field below to "".
+
+modality: ["Image", "Text", "Image + text combined", "None"]
+intent: ["Benign / Playful - (हानिरहित / रमाइलो उद्देश्य)", "Mocking/Sarcasm (उडाउने / व्यंग्यात्मक)", "Critical / Satirical (आलोचनात्मक/ व्यंग्यसहितको)", "Malicious (हानि पुर्‍याउने नियत)", "Deceptive (भ्रामक / गलत धारणा फैलाउने)"]
+cyberbullying: ["Yes", "No"]
+target: ["Individual", "Organization", "Community", "None"]
+protected_group: ["Yes", "No"]
+harm: ["Psychological/Emotional (मानसिक / भावनात्मक)", "Social/Reputational (सामाजिक / प्रतिष्ठासम्बन्धी)", "Financial or Material (आर्थिक वा भौतिक हानि)", "No Harm"]
+harmfulness: ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful"]  (only if harm != "No Harm", else "")
+emotion: ["Joy (खुशी)", "Sadness (दुःख)", "Fear (डर)", "Anger (रिस)", "Disgust (घृणा)", "Surprise (आश्चर्य)", "Trust (विश्वास)", "Anticipation (अपेक्षा)", "Ridicule (उपहास / खिल्ली उडाउने)", "Other"]
+sentiment: ["Positive", "Negative", "Neutral"]
+
+Also write a short "reasoning" (2-3 plain-English sentences): describe what the meme
+shows/says, and why you picked these labels — specific enough that a human reviewer can
+quickly catch it if your reasoning doesn't actually support the labels.
+
+Return ONLY a JSON object with exactly these keys:
+meme, sentiment, intent, cyberbullying, target, protected_group, harm, harmfulness, emotion, modality, reasoning
+"""
+
+# Guards against two threads (or two annotators) generating the same
+# suggestion at once. Module-level so it's shared across the whole app process.
+_ai_inflight_lock = threading.Lock()
+_ai_inflight = set()
+
+
+def generate_ai_suggestion(image, post_text):
+    """Call Gemini vision to get a suggested label set + reasoning for one meme."""
+    client = get_genai_client()
+    prompt = LABEL_PROMPT_INSTRUCTIONS
+    if post_text:
+        prompt += f"\n\nPost caption: {post_text}"
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[prompt, image],
+        config=types.GenerateContentConfig(response_mime_type="application/json")
+    )
+    return json.loads(response.text)
+
+
+def save_ai_suggestion(page_name, post_id, suggestion):
+    ws = get_ai_sheet()
+    ws.append_row([
+        page_name,
+        post_id,
+        suggestion.get("meme", ""),
+        suggestion.get("sentiment", ""),
+        suggestion.get("intent", ""),
+        suggestion.get("cyberbullying", ""),
+        suggestion.get("target", ""),
+        suggestion.get("protected_group", ""),
+        suggestion.get("harm", ""),
+        suggestion.get("harmfulness", ""),
+        suggestion.get("emotion", ""),
+        suggestion.get("modality", ""),
+        suggestion.get("reasoning", ""),
+        GEMINI_MODEL,
+        datetime.now().isoformat()
+    ])
+
+
+def load_ai_suggestions():
+    ws = get_ai_sheet()
+    records = ws.get_all_records()
+    df = pd.DataFrame(records) if records else pd.DataFrame(columns=AI_COLUMNS)
+    if "post_id" in df.columns:
+        df["post_id"] = df["post_id"].astype(str)
+    return df
+
+
+def _generate_and_save_if_missing(page_name, post_row):
+    """Does the actual Gemini call + sheet write. Safe to run in a background thread."""
+    pid = post_row["post_id"]
+    try:
+        img = load_private_github_image(GITHUB_OWNER, GITHUB_REPO, f"{page_name}/{post_row['image_file']}")
+        suggestion = generate_ai_suggestion(img, post_row.get("post_text", ""))
+        if suggestion:
+            existing = load_ai_suggestions()
+            dup = existing[(existing["page_name"] == page_name) & (existing["post_id"] == pid)]
+            if dup.empty:
+                save_ai_suggestion(page_name, pid, suggestion)
+    except Exception as e:
+        # Store error so the UI can surface it instead of silently swallowing it.
+        st.session_state["ai_last_error"] = f"[post_id={pid}] {type(e).__name__}: {e}"
+
+
+def ensure_ai_suggestion_async(page_name, post_row):
+    """Kick off background generation for one post if it's not already in flight."""
+    pid = post_row["post_id"]
+    key = f"{page_name}:{pid}"
+    with _ai_inflight_lock:
+        if key in _ai_inflight:
+            return
+        _ai_inflight.add(key)
+
+    def worker():
+        try:
+            _generate_and_save_if_missing(page_name, post_row)
+        finally:
+            with _ai_inflight_lock:
+                _ai_inflight.discard(key)
+
+    threading.Thread(target=worker, daemon=True).start()
+
 
 # ======================================================
 # GITHUB HELPERS
@@ -145,6 +304,17 @@ def load_annotations():
     return df
 
 
+def idx_of(options, value):
+    """Index of `value` in `options`, or None if missing/empty — used to
+    pre-select a radio button from an AI suggestion."""
+    if value in (None, "", float("nan")):
+        return None
+    try:
+        return options.index(value)
+    except (ValueError, TypeError):
+        return None
+
+
 # Fields compared to decide whether two annotators "matched" on a post.
 LABEL_COLUMNS = [
     "meme", "sentiment", "intent", "cyberbullying", "target",
@@ -183,13 +353,13 @@ def compute_agreement(page_ann_df, current_annotator):
     return results
 
 
-def show_agreement_summary(page_ann_df, current_annotator):
-    results = compute_agreement(page_ann_df, current_annotator)
-    if not results:
-        return
-    st.markdown("#### 🤝 Agreement with other annotators")
-    for other, matched, total in results:
-        st.write(f"**{matched}/{total}** matched with **{other}**")
+# def show_agreement_summary(page_ann_df, current_annotator):
+#     results = compute_agreement(page_ann_df, current_annotator)
+#     if not results:
+#         return
+#     st.markdown("#### 🤝 Agreement with other annotators")
+#     for other, matched, total in results:
+#         st.write(f"**{matched}/{total}** matched with **{other}**")
 
 
 # ======================================================
@@ -197,6 +367,8 @@ def show_agreement_summary(page_ann_df, current_annotator):
 # ======================================================
 col_meme, col_ui = st.columns([4, 6])
 
+# The mode toggle lives on the meme/image side so it stays in the same
+# screen fold as the image while you're deciding what to work on next.
 with col_meme:
     st.markdown("### Nepali Meme Annotation Dashboard")
 
@@ -209,6 +381,7 @@ with col_meme:
         key="annotation_mode"
     )
     is_reannotation = mode.startswith("🔁")
+
 # ======================================================
 # RIGHT UI
 # ======================================================
@@ -277,10 +450,42 @@ with col_ui:
             st.success(f"🎉 You've re-annotated everything eligible in **{page_name}**")
         else:
             st.success(f"🎉 No fresh (unannotated) memes left in **{page_name}**")
-        show_agreement_summary(page_ann_df, annotator)
+        #show_agreement_summary(page_ann_df, annotator)
         st.stop()
 
     row = remaining.iloc[0]
+
+    # --------------------------------------------------
+    # AI PRE-ANNOTATION: keep a rolling buffer of BUFFER_SIZE suggestions ready.
+    # Only the very first, not-yet-cached item blocks (spinner); everything
+    # else in the buffer is generated in background threads so that by the
+    # time you reach it via "Submit & Next", it's already there.
+    # --------------------------------------------------
+    ai_df = load_ai_suggestions()
+    page_ai_df = ai_df[ai_df["page_name"] == page_name] if not ai_df.empty else ai_df
+    cached_ids = set(page_ai_df["post_id"].tolist()) if not page_ai_df.empty else set()
+
+    queue_ids = remaining["post_id"].tolist()
+    buffer_ids = queue_ids[:BUFFER_SIZE]
+    current_pid = queue_ids[0]
+
+    if current_pid not in cached_ids:
+        with st.spinner("Generating AI suggestion for this meme..."):
+            _generate_and_save_if_missing(page_name, row)
+            ai_df = load_ai_suggestions()
+            page_ai_df = ai_df[ai_df["page_name"] == page_name] if not ai_df.empty else ai_df
+            cached_ids = set(page_ai_df["post_id"].tolist()) if not page_ai_df.empty else set()
+
+    for pid in buffer_ids[1:]:
+        if pid not in cached_ids:
+            pid_row = data[data["post_id"] == pid].iloc[0]
+            ensure_ai_suggestion_async(page_name, pid_row)
+            time.sleep(0.3)  # small stagger so we don't burst all requests at once
+
+    ai_suggestion_row = None
+    ai_match = page_ai_df[page_ai_df["post_id"] == row["post_id"]] if not page_ai_df.empty else page_ai_df
+    if not ai_match.empty:
+        ai_suggestion_row = ai_match.iloc[0]
 
     # Coverage info for THIS post, regardless of mode
     post_ann = page_ann_df[page_ann_df["post_id"] == row["post_id"]] if not page_ann_df.empty else page_ann_df
@@ -291,14 +496,28 @@ with col_ui:
     else:
         st.info("📊 This meme has not been annotated by anyone yet.")
 
+    if ai_suggestion_row is not None and str(ai_suggestion_row.get("reasoning", "")).strip():
+        with st.expander("🤖 AI suggestion reasoning - verify before submitting the annotation", expanded=True):
+            st.write(ai_suggestion_row["reasoning"])
+    else:
+        if "ai_last_error" in st.session_state:
+            st.error(f"🤖 AI suggestion failed: {st.session_state['ai_last_error']}")
+        else:
+            st.caption("🤖 No AI suggestion available for this meme yet.")
+
     # ======================================================
     # LABEL FORM — fully inside col_ui (RIGHT SIDE)
     # ======================================================
     with st.form("annotation_form"):
 
+        meme_default = idx_of(["Yes", "No"], ai_suggestion_row["meme"]) if ai_suggestion_row is not None else None
+        if meme_default is None:
+            meme_default = 0
+
         meme_label = st.radio(
             "Is this a meme?",
             ["Yes", "No"],
+            index=meme_default,
             horizontal=True,
             key=f"meme_label_{row['post_id']}_{mode}"
         )
@@ -314,19 +533,20 @@ with col_ui:
         modality = None
 
         if meme_label == "Yes":
-            st.markdown("### 📌 Meme Attributes")
+            st.markdown("### Meme Attributes")
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
+                modality_options = [
+                    "Image",
+                    "Text",
+                    "Image + text combined",
+                    "None",
+                ]
                 modality = st.radio(
                     "Modality.\n (Select how the meme conveys meaning) ",
-                    [
-                        "Image",
-                        "Text",
-                        "Image + text combined",
-                        "None",
-                    ],
-                    index=None,
+                    modality_options,
+                    index=idx_of(modality_options, ai_suggestion_row["modality"]) if ai_suggestion_row is not None else None,
                     key=f"modality_{row['post_id']}_{mode}",
                     horizontal=True,
                     help="""
@@ -341,16 +561,17 @@ with col_ui:
                         """
 
                 )
+                intent_options = [
+                    "Benign / Playful - (हानिरहित / रमाइलो उद्देश्य)",
+                    "Mocking/Sarcasm (उडाउने / व्यंग्यात्मक)",
+                    "Critical / Satirical (आलोचनात्मक/ व्यंग्यसहितको)",
+                    "Malicious (हानि पुर्‍याउने नियत)",
+                    "Deceptive (भ्रामक / गलत धारणा फैलाउने)"
+                ]
                 intent = st.radio(
                     "Intent of Meme",
-                    [
-                        "Benign / Playful - (हानिरहित / रमाइलो उद्देश्य)",
-                        "Mocking/Sarcasm (उडाउने / व्यंग्यात्मक)",
-                        "Critical / Satirical (आलोचनात्मक/ व्यंग्यसहितको)",
-                        "Malicious (हानि पुर्‍याउने नियत)",
-                        "Deceptive (भ्रामक / गलत धारणा फैलाउने)"
-                    ],
-                    index=None,
+                    intent_options,
+                    index=idx_of(intent_options, ai_suggestion_row["intent"]) if ai_suggestion_row is not None else None,
                     key=f"intent_{row['post_id']}_{mode}",
                     help="""
                         Select the PRIMARY intent behind the meme (choose the dominant intent).
@@ -386,10 +607,11 @@ with col_ui:
                 )
 
             with col2:
+                cb_options = ["Yes", "No"]
                 cyberbullying = st.radio(
                     "Presence of Hate / Cyber Bullying",
-                    ["Yes", "No"],
-                    index=None,
+                    cb_options,
+                    index=idx_of(cb_options, ai_suggestion_row["cyberbullying"]) if ai_suggestion_row is not None else None,
                     key=f"cyberbullying_{row['post_id']}_{mode}",
                     help="""
                         Does this meme contain hate or cyber-bullying?
@@ -409,10 +631,11 @@ with col_ui:
                         """
                 )
 
+                target_options = ["Individual", "Organization", "Community", "None"]
                 target = st.radio(
                     "Target of the meme",
-                    ["Individual", "Organization", "Community", "None"],
-                    index=None,
+                    target_options,
+                    index=idx_of(target_options, ai_suggestion_row["target"]) if ai_suggestion_row is not None else None,
                     key=f"target_{row['post_id']}_{mode}",
                     help="""
                         Select the PRIMARY target of the meme (choose one).
@@ -440,10 +663,11 @@ with col_ui:
                         """
                 )
 
+                pg_options = ["Yes", "No"]
                 protected_group = st.radio(
                     "Is target a protected group?",
-                    ["Yes", "No"],
-                    index=None,
+                    pg_options,
+                    index=idx_of(pg_options, ai_suggestion_row["protected_group"]) if ai_suggestion_row is not None else None,
                     key=f"protected_group_{row['post_id']}_{mode}",
                     help=(
                         "**Nepal Context:** Select 'Yes' if the target belongs to a group eligible for "
@@ -463,15 +687,16 @@ with col_ui:
                     *Eg. Dalits, Madhesis, Muslims, LGBTQ+, disabled, etc.*
                     """)
             with col3:
+                harm_options = [
+                    "Psychological/Emotional (मानसिक / भावनात्मक)",
+                    "Social/Reputational (सामाजिक / प्रतिष्ठासम्बन्धी)",
+                    "Financial or Material (आर्थिक वा भौतिक हानि)",
+                    "No Harm"
+                ]
                 harm = st.radio(
                     "How does this meme harm the target?",
-                    [
-                        "Psychological/Emotional (मानसिक / भावनात्मक)",
-                        "Social/Reputational (सामाजिक / प्रतिष्ठासम्बन्धी)",
-                        "Financial or Material (आर्थिक वा भौतिक हानि)",
-                        "No Harm"
-                    ],
-                    index=None,
+                    harm_options,
+                    index=idx_of(harm_options, ai_suggestion_row["harm"]) if ai_suggestion_row is not None else None,
                     key=f"harm_{row['post_id']}_{mode}",
                     help="""
                         Select the PRIMARY way this meme harms the target (choose one).
@@ -501,10 +726,11 @@ with col_ui:
                 )
 
                 st.write('')
+                harmfulness_options = ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful"]
                 harmfulness = st.radio(
                     "If 'Harmful' , please label Harmfulness Score",
-                    ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful"],
-                    index=None,
+                    harmfulness_options,
+                    index=idx_of(harmfulness_options, ai_suggestion_row["harmfulness"]) if ai_suggestion_row is not None else None,
                     key=f"harmfulness_{row['post_id']}_{mode}",
                     horizontal=True,
                     help="""
@@ -528,21 +754,22 @@ with col_ui:
                 )
 
             with col4:
+                emotion_options = [
+                    "Joy (खुशी)",
+                    "Sadness (दुःख)",
+                    "Fear (डर)",
+                    "Anger (रिस)",
+                    "Disgust (घृणा)",
+                    "Surprise (आश्चर्य)",
+                    "Trust (विश्वास)",
+                    "Anticipation (अपेक्षा)",
+                    "Ridicule (उपहास / खिल्ली उडाउने)",
+                    "Other"
+                ]
                 emotion = st.radio(
                     "Emotion",
-                    [
-                        "Joy (खुशी)",
-                        "Sadness (दुःख)",
-                        "Fear (डर)",
-                        "Anger (रिस)",
-                        "Disgust (घृणा)",
-                        "Surprise (आश्चर्य)",
-                        "Trust (विश्वास)",
-                        "Anticipation (अपेक्षा)",
-                        "Ridicule (उपहास / खिल्ली उडाउने)",
-                        "Other"
-                    ],
-                    index=None,
+                    emotion_options,
+                    index=idx_of(emotion_options, ai_suggestion_row["emotion"]) if ai_suggestion_row is not None else None,
                     key=f"emotion_{row['post_id']}_{mode}",
                     horizontal=True,
                     help="""
@@ -583,10 +810,11 @@ with col_ui:
 
                 )
 
+                sentiment_options = ["Positive", "Negative", "Neutral"]
                 sentiment = st.radio(
                     "Sentiment",
-                    ["Positive", "Negative", "Neutral"],
-                    index=None,
+                    sentiment_options,
+                    index=idx_of(sentiment_options, ai_suggestion_row["sentiment"]) if ai_suggestion_row is not None else None,
                     key=f"sentiment_{row['post_id']}_{mode}",
                     help="""
                         Choose the sentiment expressed toward the target in the meme.
@@ -635,9 +863,9 @@ with col_ui:
 
             if save_and_next:
 
-                # SAVE THE DATA (each annotator's row is appended independently,
-                # so the same post_id can accumulate multiple annotator rows
-                # for majority voting)
+                # SAVE THE DATA — human sheet only, exactly as before.
+                # Each annotator's row is appended independently, so the same
+                # post_id can accumulate multiple annotator rows for majority voting.
                 sheet.append_row([
                     page_name,
                     row["post_id"],
@@ -666,7 +894,7 @@ with col_ui:
         st.progress(my_reannotated / total_eligible if total_eligible else 0)
         st.caption(
             f"🗳️ Eligible for re-annotation in **{page_name}**: **{total_eligible}** — "
-            f"you've annotated **{my_reannotated}** of them"
+            f"you've re-annotated **{my_reannotated}** of them"
         )
     else:
         total = len(data)
