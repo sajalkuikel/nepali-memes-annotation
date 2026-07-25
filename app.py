@@ -14,6 +14,15 @@ GITHUB_OWNER = "sajalkuikel"
 GITHUB_REPO = "nepali_memes"
 GITHUB_BRANCH = "main"
 
+ANN_COLUMNS = [
+    "page_name", "post_id", "annotator", "meme", "sentiment", "intent",
+    "cyberbullying", "target", "protected_group", "harm", "harmfulness",
+    "emotion", "modality", "timestamp"
+]
+
+
+MAX_ANNOTATIONS_PER_MEME = 3
+
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Nepali Meme Annotation", layout="wide")
 
@@ -35,7 +44,7 @@ st.markdown(
 )
 
 # ======================================================
-# 🔐 AUTHENTICATION
+#  AUTHENTICATION
 # ======================================================
 def login():
     st.title("🔐 Login")
@@ -124,17 +133,87 @@ def load_private_github_image(owner, repo, path):
     r.raise_for_status()
     return Image.open(io.BytesIO(r.content))
 
+
+# ======================================================
+# SMALL HELPERS
+# ======================================================
+def load_annotations():
+    records = sheet.get_all_records()
+    df = pd.DataFrame(records) if records else pd.DataFrame(columns=ANN_COLUMNS)
+    if "post_id" in df.columns:
+        df["post_id"] = df["post_id"].astype(str)
+    return df
+
+
+# Fields compared to decide whether two annotators "matched" on a post.
+LABEL_COLUMNS = [
+    "meme", "sentiment", "intent", "cyberbullying", "target",
+    "protected_group", "harm", "harmfulness", "emotion", "modality"
+]
+
+
+def compute_agreement(page_ann_df, current_annotator):
+    """For each other annotator who shares at least one annotated post with
+    `current_annotator` on this page, return (other_annotator, matched, total),
+    sorted by total shared posts descending."""
+    if page_ann_df.empty:
+        return []
+
+    my_df = page_ann_df[page_ann_df["annotator"] == current_annotator].drop_duplicates("post_id").set_index("post_id")
+    others = sorted(
+        page_ann_df.loc[page_ann_df["annotator"] != current_annotator, "annotator"].dropna().unique().tolist()
+    )
+
+    results = []
+    for other in others:
+        other_df = page_ann_df[page_ann_df["annotator"] == other].drop_duplicates("post_id").set_index("post_id")
+        shared_ids = my_df.index.intersection(other_df.index)
+        total = len(shared_ids)
+        if total == 0:
+            continue
+        matched = 0
+        for pid in shared_ids:
+            mine = my_df.loc[pid, LABEL_COLUMNS].fillna("")
+            theirs = other_df.loc[pid, LABEL_COLUMNS].fillna("")
+            if (mine == theirs).all():
+                matched += 1
+        results.append((other, matched, total))
+
+    results.sort(key=lambda r: r[2], reverse=True)
+    return results
+
+
+def show_agreement_summary(page_ann_df, current_annotator):
+    results = compute_agreement(page_ann_df, current_annotator)
+    if not results:
+        return
+    st.markdown("#### 🤝 Agreement with other annotators")
+    for other, matched, total in results:
+        st.write(f"**{matched}/{total}** matched with **{other}**")
+
+
 # ======================================================
 # LAYOUT
 # ======================================================
 col_meme, col_ui = st.columns([4, 6])
+
+# The mode toggle lives on the meme/image side so it stays in the same
+# screen fold as the image while you're deciding what to work on next.
+with col_meme:
+    st.markdown("### Nepali Meme Annotation Dashboard")
+    mode = st.radio(
+        "📝 Annotation Mode",
+        ["🆕 Fresh Annotation", "🔁 Re-annotate (Majority Voting)"],
+        key="annotation_mode"
+    )
+    is_reannotation = mode.startswith("🔁")
 
 # ======================================================
 # RIGHT UI
 # ======================================================
 with col_ui:
     # same row: logout + dataset
-    c1, c2 = st.columns([1,4])
+    c1, c2 = st.columns([1, 4])
 
     with c1:
         st.markdown("👤 Logged in as: **" + annotator + "**")
@@ -144,30 +223,72 @@ with col_ui:
 
     with c2:
         pages = github_list_folders(GITHUB_OWNER, GITHUB_REPO)
-        page_name = st.selectbox("Select Page / Dataset", pages, key="page_select")
+        page_name = st.selectbox("Select Page / Dataset (also selects the page to re-annotate)", pages, key="page_select")
 
     data = load_page_jsonl(GITHUB_OWNER, GITHUB_REPO, page_name)
 
-    records = sheet.get_all_records()
-    ann_df = pd.DataFrame(records) if records else pd.DataFrame(
-        columns=["page_name", "post_id", "annotator", "meme", "sentiment", "intent", "cyberbullying", "target", "protected_group", "harm", "harmfulness", "emotion", "modality", "timestamp"]
+    ann_df = load_annotations()
+    page_ann_df = ann_df[ann_df["page_name"] == page_name] if not ann_df.empty else ann_df
+
+    # A post counts as "annotated" the moment ANY annotator has labeled it —
+    # not just the current user. That's what makes a post ineligible for
+    # "Fresh Annotation" and eligible for "Re-annotate".
+    all_done_ids = page_ann_df["post_id"].unique().tolist() if not page_ann_df.empty else []
+    my_done_ids = (
+        page_ann_df.loc[page_ann_df["annotator"] == annotator, "post_id"].tolist()
+        if not page_ann_df.empty else []
+    )
+    # Posts an earlier annotator marked as "not a meme" are excluded from
+    # re-annotation entirely (nothing to build majority-vote consensus on).
+    non_meme_ids = (
+        page_ann_df.loc[page_ann_df["meme"] == "No", "post_id"].unique().tolist()
+        if not page_ann_df.empty else []
     )
 
-    ann_df["post_id"] = ann_df["post_id"].astype(str)
+    # --------------------------------------------------
+    # BUILD THE QUEUE DEPENDING ON MODE
+    # --------------------------------------------------
+    ann_counts = page_ann_df["post_id"].value_counts() if not page_ann_df.empty else pd.Series(dtype=int)
 
-    done_ids = ann_df[
-        ann_df["page_name"] == page_name
-    ]["post_id"].tolist()
+    if is_reannotation:
+        # A meme that already has MAX_ANNOTATIONS_PER_MEME annotations is
+        # considered complete and drops out of the re-annotation pool.
+        maxed_out_ids = ann_counts[ann_counts >= MAX_ANNOTATIONS_PER_MEME].index.tolist()
 
-    remaining = data[~data["post_id"].isin(done_ids)]
+        eligible_pool_ids = [
+            pid for pid in all_done_ids
+            if pid not in non_meme_ids and pid not in maxed_out_ids
+        ]
+        review_ids = [pid for pid in eligible_pool_ids if pid not in my_done_ids]
+        remaining = data[data["post_id"].isin(review_ids)].copy()
+
+        # Prioritize memes that already have MORE annotations, so a meme with
+        # 2 annotations reaches a 3rd annotator before a meme with only 1
+        # annotation reaches its 2nd — this closes out majority-vote sets faster.
+        remaining["_ann_count"] = remaining["post_id"].map(ann_counts).fillna(0)
+        remaining = remaining.sort_values("_ann_count", ascending=False).drop(columns="_ann_count")
+    else:
+        # Fresh = nobody has annotated it yet, regardless of who you are.
+        remaining = data[~data["post_id"].isin(all_done_ids)]
 
     if remaining.empty:
-        st.success(f"🎉 All annotations completed for **{page_name}**")
+        if is_reannotation:
+            st.success(f"🎉 You've re-annotated everything eligible in **{page_name}**")
+        else:
+            st.success(f"🎉 No fresh (unannotated) memes left in **{page_name}**")
+        show_agreement_summary(page_ann_df, annotator)
         st.stop()
 
     row = remaining.iloc[0]
 
-    # st.markdown("---")
+    # Coverage info for THIS post, regardless of mode
+    post_ann = page_ann_df[page_ann_df["post_id"] == row["post_id"]] if not page_ann_df.empty else page_ann_df
+    annotators_so_far = post_ann["annotator"].unique().tolist() if not post_ann.empty else []
+
+    if annotators_so_far:
+        st.info(f"📊 This meme has been annotated **{len(post_ann)}** time(s) — by: {', '.join(annotators_so_far)}")
+    else:
+        st.info("📊 This meme has not been annotated by anyone yet.")
 
     # ======================================================
     # LABEL FORM — fully inside col_ui (RIGHT SIDE)
@@ -178,7 +299,7 @@ with col_ui:
             "Is this a meme?",
             ["Yes", "No"],
             horizontal=True,
-            key=f"meme_label_{row['post_id']}"
+            key=f"meme_label_{row['post_id']}_{mode}"
         )
 
         sentiment = None
@@ -191,8 +312,7 @@ with col_ui:
         emotion = None
         modality = None
 
-
-        if meme_label == "Yes":  
+        if meme_label == "Yes":
             st.markdown("### 📌 Meme Attributes")
             col1, col2, col3, col4 = st.columns(4)
 
@@ -206,9 +326,9 @@ with col_ui:
                         "None",
                     ],
                     index=None,
-                    key=f"modality_{row['post_id']}",
+                    key=f"modality_{row['post_id']}_{mode}",
                     horizontal=True,
-                    help = """
+                    help="""
                         Select how the meme mainly delivers its meaning.
 
                         Image — The picture alone gives the message. (केवल तस्बिरले बुझिन्छ)
@@ -222,10 +342,16 @@ with col_ui:
                 )
                 intent = st.radio(
                     "Intent of Meme",
-                    ["Benign / Playful - (हानिरहित / रमाइलो उद्देश्य)", "Mocking/Sarcasm (उडाउने / व्यंग्यात्मक)", "Critical / Satirical (आलोचनात्मक/ व्यंग्यसहितको)", "Malicious (हानि पुर्‍याउने नियत)", "Deceptive (भ्रामक / गलत धारणा फैलाउने)"],
+                    [
+                        "Benign / Playful - (हानिरहित / रमाइलो उद्देश्य)",
+                        "Mocking/Sarcasm (उडाउने / व्यंग्यात्मक)",
+                        "Critical / Satirical (आलोचनात्मक/ व्यंग्यसहितको)",
+                        "Malicious (हानि पुर्‍याउने नियत)",
+                        "Deceptive (भ्रामक / गलत धारणा फैलाउने)"
+                    ],
                     index=None,
-                    key=f"intent_{row['post_id']}",
-                    help = """
+                    key=f"intent_{row['post_id']}_{mode}",
+                    help="""
                         Select the PRIMARY intent behind the meme (choose the dominant intent).
 
                         Benign / Playful (हानिरहित / रमाइलो)
@@ -259,12 +385,12 @@ with col_ui:
                 )
 
             with col2:
-                 cyberbullying = st.radio(
+                cyberbullying = st.radio(
                     "Presence of Hate / Cyber Bullying",
                     ["Yes", "No"],
                     index=None,
-                    key=f"cyberbullying_{row['post_id']}",
-                    help = """
+                    key=f"cyberbullying_{row['post_id']}_{mode}",
+                    help="""
                         Does this meme contain hate or cyber-bullying?
 
                         Yes
@@ -281,13 +407,13 @@ with col_ui:
                         Read image + text together before choosing.
                         """
                 )
-                 
-                 target = st.radio(
+
+                target = st.radio(
                     "Target of the meme",
-                    ["Individual", "Organization", 'Community', "None"],
+                    ["Individual", "Organization", "Community", "None"],
                     index=None,
-                    key=f"target_{row['post_id']}",
-                    help = """
+                    key=f"target_{row['post_id']}_{mode}",
+                    help="""
                         Select the PRIMARY target of the meme (choose one).
 
                         Individual (व्यक्ति)
@@ -312,12 +438,12 @@ with col_ui:
                         - Read image + overlaid text + caption together before deciding.
                         """
                 )
-                 
-                 protected_group = st.radio(
+
+                protected_group = st.radio(
                     "Is target a protected group?",
                     ["Yes", "No"],
                     index=None,
-                    key=f"protected_group_{row['post_id']}",
+                    key=f"protected_group_{row['post_id']}_{mode}",
                     help=(
                         "**Nepal Context:** Select 'Yes' if the target belongs to a group eligible for "
                         "reservation/protection under Nepal's Civil Service Act or Constitution.\n\n"
@@ -331,17 +457,22 @@ with col_ui:
                         "- **Gender & Sexual Minorities** (LGBTQ+)"
                     )
                 )
-                 st.caption("""
+                st.caption("""
                     Includes: Caste/ Religion/ Gender & Sexual Minorities/ Disability/ Region/ Language/ Economic Class/ Ideology  
                     *Eg. Dalits, Madhesis, Muslims, LGBTQ+, disabled, etc.*
                     """)
             with col3:
                 harm = st.radio(
                     "How does this meme harm the target?",
-                    ["Psychological/Emotional (मानसिक / भावनात्मक)", "Social/Reputational (सामाजिक / प्रतिष्ठासम्बन्धी)", "Financial or Material (आर्थिक वा भौतिक हानि)",  "No Harm"],
+                    [
+                        "Psychological/Emotional (मानसिक / भावनात्मक)",
+                        "Social/Reputational (सामाजिक / प्रतिष्ठासम्बन्धी)",
+                        "Financial or Material (आर्थिक वा भौतिक हानि)",
+                        "No Harm"
+                    ],
                     index=None,
-                    key=f"harm_{row['post_id']}",
-                    help = """
+                    key=f"harm_{row['post_id']}_{mode}",
+                    help="""
                         Select the PRIMARY way this meme harms the target (choose one).
 
                         Psychological/Emotional (मानसिक / भावनात्मक)
@@ -367,16 +498,15 @@ with col_ui:
                         """
 
                 )
-                
-                harmfulness = ""
+
                 st.write('')
                 harmfulness = st.radio(
                     "If 'Harmful' , please label Harmfulness Score",
-                    ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful" ],
+                    ["(1) Offensive", "(2) Partially harmful", "(3) Very harmful"],
                     index=None,
-                    key=f"harmfulness_{row['post_id']}",
+                    key=f"harmfulness_{row['post_id']}_{mode}",
                     horizontal=True,
-                    help = """
+                    help="""
                         If the meme is harmful, choose how harmful it is.
 
                         (1) Offensive
@@ -412,9 +542,9 @@ with col_ui:
                         "Other"
                     ],
                     index=None,
-                    key=f"emotion_{row['post_id']}",
+                    key=f"emotion_{row['post_id']}_{mode}",
                     horizontal=True,
-                    help = """
+                    help="""
                         Select the PRIMARY emotion the meme conveys toward its target.
 
                         Joy (खुशी)
@@ -451,12 +581,12 @@ with col_ui:
                         """
 
                 )
-                
+
                 sentiment = st.radio(
                     "Sentiment",
                     ["Positive", "Negative", "Neutral"],
                     index=None,
-                    key=f"sentiment_{row['post_id']}",
+                    key=f"sentiment_{row['post_id']}_{mode}",
                     help="""
                         Choose the sentiment expressed toward the target in the meme.
 
@@ -470,11 +600,11 @@ with col_ui:
                         Always judge using BOTH image and text together, and consider context if available.
                         """
                 )
-                
 
         submitted = st.form_submit_button("➡️ Submit & Next")
 
         if submitted:
+            save_and_next = False
             # ==============================
             # VALIDATION ONLY IF MEME = YES
             # ==============================
@@ -502,10 +632,11 @@ with col_ui:
                 # Meme = No → always valid
                 save_and_next = True
 
+            if save_and_next:
 
-            if submitted and 'save_and_next' in locals() and save_and_next:
-
-                # SAVE THE DATA
+                # SAVE THE DATA (each annotator's row is appended independently,
+                # so the same post_id can accumulate multiple annotator rows
+                # for majority voting)
                 sheet.append_row([
                     page_name,
                     row["post_id"],
@@ -520,30 +651,38 @@ with col_ui:
                     harmfulness if harmfulness else "",
                     emotion if emotion else "",
                     modality if modality else "",
-
                     datetime.now().isoformat()
                 ])
 
                 st.rerun()
 
-    progress = len(done_ids) / len(data)
-    st.progress(progress)
-    st.caption(f"{len(done_ids)} / {len(data)} annotated for {page_name}")
+    # --------------------------------------------------
+    # PROGRESS (depends on mode)
+    # --------------------------------------------------
+    if is_reannotation:
+        total_eligible = len(eligible_pool_ids)
+        my_reannotated = len([pid for pid in eligible_pool_ids if pid in my_done_ids])
+        st.progress(my_reannotated / total_eligible if total_eligible else 0)
+        st.caption(
+            f"🗳️ Eligible for re-annotation in **{page_name}**: **{total_eligible}** — "
+            f"you've re-annotated **{my_reannotated}** of them"
+        )
+    else:
+        total = len(data)
+        done = len(all_done_ids)
+        st.progress(done / total if total else 0)
+        st.caption(f"{done} / {total} memes have at least one annotation in {page_name}")
 
 # ======================================================
-# LEFT MEME DISPLAY
+# LEFT MEME DISPLAY (continues the col_meme container opened above)
 # ======================================================
 with col_meme:
-    st.markdown("### Nepali Meme Annotation Dashboard")
     if row.get("post_text"):
-        # st.markdown("---")
         st.markdown(f"🔗 **[Click here to view original post]({row['post_url']})**")
-        # st.markdown(row["post_text"])
         st.info(row["post_text"])
-
 
     try:
         img = load_private_github_image(GITHUB_OWNER, GITHUB_REPO, f"{page_name}/{row['image_file']}")
         st.image(img, use_column_width=True)
-    except:
+    except Exception:
         st.error("No image available for this post.")
