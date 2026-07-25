@@ -197,17 +197,18 @@ def show_agreement_summary(page_ann_df, current_annotator):
 # ======================================================
 col_meme, col_ui = st.columns([4, 6])
 
-# The mode toggle lives on the meme/image side so it stays in the same
-# screen fold as the image while you're deciding what to work on next.
 with col_meme:
     st.markdown("### Nepali Meme Annotation Dashboard")
+
+    if "annotation_mode" not in st.session_state:
+        st.session_state["annotation_mode"] = "🔁 Re-annotate (Majority Voting)"
+
     mode = st.radio(
         "📝 Annotation Mode",
         ["🆕 Fresh Annotation", "🔁 Re-annotate (Majority Voting)"],
         key="annotation_mode"
     )
     is_reannotation = mode.startswith("🔁")
-
 # ======================================================
 # RIGHT UI
 # ======================================================
@@ -665,7 +666,7 @@ with col_ui:
         st.progress(my_reannotated / total_eligible if total_eligible else 0)
         st.caption(
             f"🗳️ Eligible for re-annotation in **{page_name}**: **{total_eligible}** — "
-            f"you've re-annotated **{my_reannotated}** of them"
+            f"you've annotated **{my_reannotated}** of them"
         )
     else:
         total = len(data)
