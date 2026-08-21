@@ -93,6 +93,20 @@ if not st.session_state["authenticated"]:
 
 annotator = st.session_state["username"]
 
+ 
+# # ======================================================
+# # NAVIGATION SIDEBAR
+# # ======================================================
+# with st.sidebar:
+#     st.markdown("## 🗂️ Navigation")
+#     st.page_link("app.py", label="✏️ Annotation", icon="🖊")
+#     admin_users = st.secrets.get("admin_users", [])
+#     st.write(admin_users)
+#     if annotator in admin_users:
+#         st.page_link("pages/admin.py", label="📊 Admin Report", icon="📈")
+#     st.markdown("---")
+ 
+
 # ======================================================
 # GOOGLE SHEETS
 # ======================================================
@@ -112,7 +126,7 @@ def get_spreadsheet():
 
 @st.cache_resource
 def get_sheet():
-    # The human annotation worksheet — untouched, exactly as before.
+    # The human annotation worksheet 
     return get_spreadsheet().sheet1
 
 
@@ -901,6 +915,8 @@ with col_ui:
         done = len(all_done_ids)
         st.progress(done / total if total else 0)
         st.caption(f"{done} / {total} memes have at least one annotation in {page_name}")
+
+    st.code(str(row["post_id"]), language=None)  # Copy button
 
 # ======================================================
 # LEFT MEME DISPLAY (continues the col_meme container opened above)
