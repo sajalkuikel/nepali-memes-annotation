@@ -929,5 +929,7 @@ with col_meme:
     try:
         img = load_private_github_image(GITHUB_OWNER, GITHUB_REPO, f"{page_name}/{row['image_file']}")
         st.image(img, use_column_width=True)
-    except Exception:
+    except Exception as e :
         st.error("No image available for this post.")
+        with st.expander("See error details"):
+            st.exception(e)
